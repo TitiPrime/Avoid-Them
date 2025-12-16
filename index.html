@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Évite-les ! (Mobile)</title>
+  <style>
+    :root{--bg:#0b1020;--panel:#0f1733;--line:#2a3a7a;--txt:#fff}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Arial}
+    body{display:flex;align-items:center;justify-content:center;padding:12px}
+    #wrap{width:min(980px,100%);display:grid;gap:10px}
+    #topbar{
+      display:flex;gap:10px;align-items:center;justify-content:space-between;
+      background:var(--panel);border:2px solid var(--line);border-radius:14px;padding:10px 12px
+    }
+    .left{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .stat{font-weight:700}
+    .muted{opacity:.8;font-weight:600}
+    button{
+      appearance:none;border:0;border-radius:12px;padding:10px 12px;
+      background:#1f2a5a;color:#fff;font-weight:800;cursor:pointer
+    }
+    button:active{transform:translateY(1px)}
+    #game{
+      width:100%;
+      aspect-ratio: 16/9;
+      max-height: 72vh;
+      background:var(--panel);
+      border:2px solid var(--line);
+      border-radius:14px;
+      display:block;
+      touch-action:none; /* important pour le tactile */
+    }
+    #help{
+      background:rgba(0,0,0,.35);border:1px solid rgba(255,255,255,.12);
+      border-radius:14px;padding:10px 12px;line-height:1.35
+    }
+    .kbd{display:inline-block;padding:2px 7px;border:1px solid rgba(255,255,255,.2);border-radius:8px;background:rgba(255,255,255,.06);font-weight:800}
+    @media (max-width:560px){
+      #topbar{gap:8px}
+      button{padding:9px 10px}
+      #help{font-size:14px}
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="topbar">
+      <div class="left">
+        <div class="stat">Score : <span id="score">0</span></div>
+        <div class="muted">Record : <span id="best">0</span></div>
+        <div class="muted">Vies : <span id="lives">3</span></div>
+      </div>
+      <div class="right" style="display:flex;gap:8px;align-items:center;">
+        <button id="btnStart">Jouer</button>
+        <button id="btnPause">Pause</button>
+        <button id="btnFull">Plein écran</button>
+      </div>
+    </div>
+
+    <canvas id="game" width="1280" height="720" aria-label="Jeu"></canvas>
+
+    <div id="help">
+      <b>But :</b> attrape les <span class="kbd">⭐</span> pour marquer des points, évite les <span class="kbd">⚠️</span> !
+      <br/>
+      <b>Mobile :</b> glisse ton doigt pour déplacer le joueur.
+      <br/>
+      <b>PC :</b> flèches ou <span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span>.
+    </div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  const scoreEl = document.getElementById("score");
+  const bestEl  = document.getElementById("best");
+  const livesEl = document.getElementById("lives");
+  const btnStart = document.getElementById("btnStart");
+  const btnPause = document.getElementById("btnPause");
+  const btnFull  = document.getElementById("btnFull");
+
+  // --- Utils ---
+  const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
+  const rand = (min,max)=>Math.random()*(max-min)+min;
+  const dist2 = (ax,ay,bx,by)=>((ax-bx)**2 + (ay-by)**2);
+
+  // --- Game state ---
+  let running = false;
+  let paused  = false;
+  let lastT = 0;
+
+  let score = 0;
+  let best = Number(localStorage.getItem("evite_best") || 0);
+  let lives = 3;
+
+  // Player
+  const player = {
+    x: canvas.width*0.2,
+    y: canvas.height*0.5,
+    r: 26,
+    vx: 0,
+    vy: 0,
+    speed: 520,
+    targetX: null,
+    targetY: null
+  };
+
+  // Entities
+  const hazards = [];
+  const stars = [];
+
+  // Difficulty
+  let hazardRate = 0.85;   // hazards/sec
+  let starRate   = 0.55;   // stars/sec
+  let hazardTimer = 0;
+  let starTimer = 0;
+
+  // Input (keyboard)
+  const keys = new Set();
+  window.addEventListener("keydown",(e)=>{ keys.add(e.key.toLowerCase()); if(["arrowup","arrowdown","arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault(); },{passive:false});
+  window.addEventListener("keyup",(e)=> keys.delete(e.key.toLowerCase()));
+
+  // Input (touch/mouse drag)
+  let dragging = false;
+
+  function canvasToWorld(clientX, clientY){
+    const rect = canvas.getBoundingClientRect();
+    const x = (clientX - rect.left) * (canvas.width / rect.width);
+    const y = (clientY - rect.top)  * (canvas.height / rect.height);
+    return {x,y};
+  }
+
+  function onPointerDown(e){
+    dragging = true;
+    const p = canvasToWorld(e.clientX, e.clientY);
+    player.targetX = p.x;
+    player.targetY = p.y;
+  }
+  function onPointerMove(e){
+    if(!dragging) return;
+    const p = canvasToWorld(e.clientX, e.clientY);
+    player.targetX = p.x;
+    player.targetY = p.y;
+  }
+  function onPointerUp(){
+    dragging = false;
+    player.targetX = null;
+    player.targetY = null;
+  }
+
+  canvas.addEventListener("pointerdown", (e)=>{ canvas.setPointerCapture(e.pointerId); onPointerDown(e); }, {passive:false});
+  canvas.addEventListener("pointermove", (e)=>{ onPointerMove(e); }, {passive:false});
+  canvas.addEventListener("pointerup",   ()=>{ onPointerUp(); }, {passive:true});
+  canvas.addEventListener("pointercancel",()=>{ onPointerUp(); }, {passive:true});
+
+  // Fullscreen
+  btnFull.addEventListener("click", async () => {
+    try{
+      if(!document.fullscreenElement){
+        await canvas.requestFullscreen();
+      }else{
+        await document.exitFullscreen();
+      }
+    }catch(err){}
+  });
+
+  // Start / Pause
+  btnStart.addEventListener("click", () => startGame());
+  btnPause.addEventListener("click", () => {
+    if(!running) return;
+    paused = !paused;
+    btnPause.textContent = paused ? "Reprendre" : "Pause";
+  });
+
+  function reset(){
+    score = 0;
+    lives = 3;
+    hazardRate = 0.85;
+    starRate = 0.55;
+    hazardTimer = 0;
+    starTimer = 0;
+    hazards.length = 0;
+    stars.length = 0;
+    player.x = canvas.width*0.2;
+    player.y = canvas.height*0.5;
+    player.vx = 0; player.vy = 0;
+    player.targetX = null; player.targetY = null;
+    scoreEl.textContent = score;
+    livesEl.textContent = lives;
+  }
+
+  function startGame(){
+    reset();
+    running = true;
+    paused = false;
+    btnPause.textContent = "Pause";
+    lastT = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function spawnHazard(){
+    const fromTop = Math.random() < 0.5;
+    const y = fromTop ? -30 : canvas.height + 30;
+    const x = rand(canvas.width*0.35, canvas.width*1.05);
+    hazards.push({
+      x, y,
+      r: rand(20,32),
+      vx: rand(-120,-380),
+      vy: fromTop ? rand(120,280) : rand(-280,-120)
+    });
+  }
+
+  function spawnStar(){
+    const y = rand(60, canvas.height-60);
+    const x = canvas.width + 40;
+    stars.push({
+      x,y,
+      r: 18,
+      vx: rand(-180,-340),
+      t: 0
+    });
+  }
+
+  function update(dt){
+    // Increase difficulty slowly
+    hazardRate = Math.min(2.2, 0.85 + score/120);
+    starRate   = Math.min(1.2, 0.55 + score/220);
+
+    // Keyboard movement (adds velocity)
+    let ax = 0, ay = 0;
+    const k = (s)=>keys.has(s);
+    if(k("arrowleft")||k("a")) ax -= 1;
+    if(k("arrowright")||k("d")) ax += 1;
+    if(k("arrowup")||k("w")) ay -= 1;
+    if(k("arrowdown")||k("s")) ay += 1;
+
+    // Pointer target movement (mobile)
+    if(player.targetX !== null && player.targetY !== null){
+      const dx = player.targetX - player.x;
+      const dy = player.targetY - player.y;
+      const len = Math.hypot(dx,dy) || 1;
+      ax += dx/len;
+      ay += dy/len;
+    }
+
+    // Normalize if diagonal
+    const lenA = Math.hypot(ax,ay);
+    if(lenA > 1){
+      ax/=lenA; ay/=lenA;
+    }
+
+    player.vx = ax * player.speed;
+    player.vy = ay * player.speed;
+
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+
+    player.x = clamp(player.x, player.r, canvas.width - player.r);
+    player.y = clamp(player.y, player.r, canvas.height - player.r);
+
+    // Spawning
+    hazardTimer += dt;
+    starTimer += dt;
+
+    const hazardInterval = 1 / hazardRate;
+    const starInterval   = 1 / starRate;
+
+    while(hazardTimer >= hazardInterval){
+      hazardTimer -= hazardInterval;
+      spawnHazard();
+    }
+    while(starTimer >= starInterval){
+      starTimer -= starInterval;
+      spawnStar();
+    }
+
+    // Move hazards
+    for(const h of hazards){
+      h.x += h.vx * dt;
+      h.y += h.vy * dt;
+    }
+    // Move stars
+    for(const s of stars){
+      s.t += dt;
+      s.x += s.vx * dt;
+      s.y += Math.sin(s.t*6) * 20 * dt; // petit mouvement
+    }
+
+    // Cleanup off-screen
+    for(let i=hazards.length-1;i>=0;i--){
+      const h = hazards[i];
+      if(h.x < -80 || h.y < -120 || h.y > canvas.height+120) hazards.splice(i,1);
+    }
+    for(let i=stars.length-1;i>=0;i--){
+      const s = stars[i];
+      if(s.x < -80) stars.splice(i,1);
+    }
+
+    // Collisions (player vs hazard/star)
+    for(let i=hazards.length-1;i>=0;i--){
+      const h = hazards[i];
+      const rr = (player.r + h.r);
+      if(dist2(player.x,player.y,h.x,h.y) <= rr*rr){
+        hazards.splice(i,1);
+        lives -= 1;
+        livesEl.textContent = lives;
+        // small knockback
+        player.x = clamp(player.x - 20, player.r, canvas.width-player.r);
+        if(lives <= 0){
+          endGame();
+          return;
+        }
+      }
+    }
+
+    for(let i=stars.length-1;i>=0;i--){
+      const s = stars[i];
+      const rr = (player.r + s.r);
+      if(dist2(player.x,player.y,s.x,s.y) <= rr*rr){
+        stars.splice(i,1);
+        score += 5;
+        scoreEl.textContent = score;
+      }
+    }
+
+    // Score increases with survival
+    score += dt * 1.5;
+    scoreEl.textContent = Math.floor(score);
+
+    if(score > best){
+      best = Math.floor(score);
+      localStorage.setItem("evite_best", String(best));
+      bestEl.textContent = best;
+    }
+  }
+
+  function endGame(){
+    running = false;
+    paused = false;
+    btnPause.textContent = "Pause";
+  }
+
+  function draw(){
+    // Background
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // Subtle grid
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1;
+    for(let x=0; x<=canvas.width; x+=80){
+      ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke();
+    }
+    for(let y=0; y<=canvas.height; y+=80){
+      ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // Stars
+    for(const s of stars){
+      ctx.font = `${Math.floor(s.r*2)}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("⭐", s.x, s.y);
+    }
+
+    // Hazards
+    for(const h of hazards){
+      ctx.font = `${Math.floor(h.r*2.1)}px system-ui`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("⚠️", h.x, h.y);
+    }
+
+    // Player
+    ctx.font = `${Math.floor(player.r*2.2)}px system-ui`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🟦", player.x, player.y);
+
+    // Overlays
+    if(!running){
+      drawCenterPanel("Évite-les !", "Appuie sur Jouer\nMobile : glisse ton doigt\nPC : flèches ou WASD");
+    } else if(paused){
+      drawCenterPanel("Pause", "Appuie sur Reprendre");
+    } else if(lives <= 0){
+      drawCenterPanel("Terminé", `Score : ${Math.floor(score)}\nRecord : ${best}\nAppuie sur Jouer`);
+    }
+  }
+
+  function drawCenterPanel(title, lines){
+    ctx.save();
+    const w = canvas.width * 0.62;
+    const h = canvas.height * 0.34;
+    const x = (canvas.width - w)/2;
+    const y = (canvas.height - h)/2;
+
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = "#000000";
+    roundRect(ctx, x, y, w, h, 20);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = "rgba(255,255,255,.18)";
+    ctx.lineWidth = 2;
+    roundRect(ctx, x, y, w, h, 20);
+    ctx.stroke();
+
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "900 56px system-ui";
+    ctx.fillText(title, canvas.width/2, y + h*0.32);
+
+    ctx.font = "600 28px system-ui";
+    const parts = String(lines).split("\n");
+    let yy = y + h*0.62;
+    for(const p of parts){
+      ctx.fillText(p, canvas.width/2, yy);
+      yy += 38;
+    }
+    ctx.restore();
+  }
+
+  function roundRect(ctx, x, y, w, h, r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr,y);
+    ctx.arcTo(x+w,y,x+w,y+h,rr);
+    ctx.arcTo(x+w,y+h,x,y+h,rr);
+    ctx.arcTo(x,y+h,x,y,rr);
+    ctx.arcTo(x,y,x+w,y,rr);
+    ctx.closePath();
+  }
+
+  function loop(t){
+    if(!running){ draw(); return; }
+    const dt = Math.min(0.033, (t - lastT) / 1000);
+    lastT = t;
+
+    if(!paused) update(dt);
+    draw();
+
+    requestAnimationFrame(loop);
+  }
+
+  // Init UI
+  bestEl.textContent = best;
+  livesEl.textContent = lives;
+  draw();
+
+})();
+</script>
+</body>
+</html>
